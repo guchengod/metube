@@ -190,8 +190,21 @@ describe('App', () => {
     app.titleRegex = 'EPISODE';
     app.addSubscription();
     expect(subs.subscribeCalls.length).toBe(1);
-    const payload = subs.subscribeCalls[0] as { titleRegex: string };
+    const payload = subs.subscribeCalls[0] as { titleRegex: string; skipSubscriberOnly: boolean };
     expect(payload.titleRegex).toBe('EPISODE');
+    expect(payload.skipSubscriberOnly).toBe(false);
+  });
+
+  it('includes skipSubscriberOnly true when checked', () => {
+    const fixture = TestBed.createComponent(App);
+    const app = fixture.componentInstance;
+    const subs = TestBed.inject(SubscriptionsService) as unknown as SubscriptionsServiceStub;
+    app.addUrl = 'https://example.com/channel';
+    app.skipSubscriberOnly = true;
+    app.addSubscription();
+    expect(subs.subscribeCalls.length).toBe(1);
+    const payload = subs.subscribeCalls[0] as { skipSubscriberOnly: boolean };
+    expect(payload.skipSubscriberOnly).toBe(true);
   });
 
   it('omits clip fields from subscribe payload', () => {

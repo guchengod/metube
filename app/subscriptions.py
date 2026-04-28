@@ -127,6 +127,21 @@ def _entry_id(entry: dict) -> Optional[str]:
     return url
 
 
+def _is_subscriber_only_entry(entry: dict) -> bool:
+    """True when yt-dlp marks the entry as channel member-only (subscriber_only availability)."""
+    return str(entry.get("availability") or "") == "subscriber_only"
+
+
+def coerce_optional_bool(value: Any, *, default: bool = False, field_name: str = "value") -> bool:
+    """Parse optional JSON booleans for subscription settings."""
+    if value is None:
+        return default
+    try:
+        return _coerce_bool(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a boolean") from exc
+
+
 @dataclass
 class SubscriptionInfo:
     id: str
@@ -149,6 +164,7 @@ class SubscriptionInfo:
     ytdl_options_presets: list[str] = field(default_factory=list)
     ytdl_options_overrides: dict[str, Any] = field(default_factory=dict)
     title_regex: str = ""
+    skip_subscriber_only: bool = False
     last_checked: Optional[float] = None
     seen_ids: list[str] = field(default_factory=list)
     error: Optional[str] = None
@@ -170,6 +186,7 @@ class SubscriptionInfo:
             "quality": self.quality,
             "folder": self.folder,
             "title_regex": self.title_regex,
+            "skip_subscriber_only": self.skip_subscriber_only,
             "last_checked": self.last_checked,
             "seen_count": len(self.seen_ids),
             "error": self.error,
@@ -198,6 +215,7 @@ def _subscription_to_record(sub: SubscriptionInfo) -> dict[str, Any]:
         "ytdl_options_presets": list(sub.ytdl_options_presets),
         "ytdl_options_overrides": sub.ytdl_options_overrides,
         "title_regex": sub.title_regex,
+        "skip_subscriber_only": sub.skip_subscriber_only,
         "last_checked": sub.last_checked,
         "seen_ids": list(sub.seen_ids),
         "error": sub.error,
@@ -469,6 +487,7 @@ class SubscriptionManager:
         ytdl_options_presets: Optional[list[str]] = None,
         ytdl_options_overrides: Optional[dict[str, Any]] = None,
         title_regex: Any = None,
+        skip_subscriber_only: Any = None,
     ) -> dict:
         url = self._normalize_url(url)
         if not url:
@@ -477,6 +496,14 @@ class SubscriptionManager:
             title_regex_stored = validate_title_regex(title_regex)
         except re.error as exc:
             return {"status": "error", "msg": f"Invalid title_regex: {exc}"}
+        try:
+            skip_so = coerce_optional_bool(
+                skip_subscriber_only,
+                default=False,
+                field_name="skip_subscriber_only",
+            )
+        except ValueError as exc:
+            return {"status": "error", "msg": str(exc)}
 
         async with self._lock:
             if url in self._url_index or url in self._pending_urls:
@@ -535,6 +562,7 @@ class SubscriptionManager:
                 ytdl_options_presets=list(ytdl_options_presets or []),
                 ytdl_options_overrides=dict(ytdl_options_overrides or {}),
                 title_regex=title_regex_stored,
+                skip_subscriber_only=skip_so,
                 last_checked=time.time(),
                 seen_ids=list(dict.fromkeys(all_ids)),
                 error=None,
@@ -588,6 +616,18 @@ class SubscriptionManager:
             except re.error as exc:
                 return {"status": "error", "msg": f"Invalid title_regex: {exc}"}
 
+        skip_so_set = False
+        validated_skip_so = False
+        if "skip_subscriber_only" in changes:
+            try:
+                validated_skip_so = coerce_optional_bool(
+                    changes["skip_subscriber_only"],
+                    field_name="skip_subscriber_only",
+                )
+                skip_so_set = True
+            except ValueError as exc:
+                return {"status": "error", "msg": str(exc)}
+
         async with self._lock:
             sub = self._subs.get(sub_id)
             if not sub:
@@ -603,6 +643,8 @@ class SubscriptionManager:
                 sub.name = str(changes["name"])
             if validated_tr is not None:
                 sub.title_regex = validated_tr
+            if skip_so_set:
+                sub.skip_subscriber_only = validated_skip_so
 
             try:
                 self._save_locked()
@@ -695,6 +737,7 @@ class SubscriptionManager:
             dl_ytdl_presets = list(cur.ytdl_options_presets)
             dl_ytdl_overrides = dict(cur.ytdl_options_overrides)
             dl_title_regex = cur.title_regex or ""
+            dl_skip_subscriber_only = bool(cur.skip_subscriber_only)
 
         new_entries: list[dict] = []
         for ent in entries:
@@ -727,6 +770,18 @@ class SubscriptionManager:
                     continue
             queue_entries.append(ent)
 
+        subscriber_filtered_ids: list[str] = []
+        if dl_skip_subscriber_only:
+            kept_entries: list[dict] = []
+            for ent in queue_entries:
+                eid = _entry_id(ent)
+                if _is_subscriber_only_entry(ent):
+                    if eid:
+                        subscriber_filtered_ids.append(eid)
+                    continue
+                kept_entries.append(ent)
+            queue_entries = kept_entries
+
         queued_ids, queue_errors = await self._queue_subscription_entries(
             queue_entries,
             download_type=dl_type,
@@ -745,15 +800,20 @@ class SubscriptionManager:
             ytdl_options_overrides=dl_ytdl_overrides,
         )
         log.info(
-            "Subscription check finished for %s: %d new, %d filtered, %d queued, %d failed",
+            "Subscription check finished for %s: %d new, %d filtered, %d subscriber_skipped, %d queued, %d failed",
             sub.name,
             len(new_entries),
             len(filtered_ids),
+            len(subscriber_filtered_ids),
             len(queued_ids),
             len(queue_errors),
         )
 
-        merged = list(dict.fromkeys(queued_ids + filtered_ids + seen_ids_snapshot))
+        merged = list(
+            dict.fromkeys(
+                queued_ids + filtered_ids + subscriber_filtered_ids + seen_ids_snapshot
+            )
+        )
         max_seen = int(getattr(self.config, "SUBSCRIPTION_MAX_SEEN_IDS", 50000))
         if len(merged) > max_seen:
             merged = merged[:max_seen]

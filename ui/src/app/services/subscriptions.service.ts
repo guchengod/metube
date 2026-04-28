@@ -11,6 +11,7 @@ import { AddDownloadPayload } from './downloads.service';
 export interface SubscribePayload extends AddDownloadPayload {
   checkIntervalMinutes: number;
   titleRegex: string;
+  skipSubscriberOnly: boolean;
 }
 
 @Injectable({
@@ -99,6 +100,7 @@ export class SubscriptionsService {
         ytdl_options_overrides: payload.ytdlOptionsOverrides,
         check_interval_minutes: payload.checkIntervalMinutes,
         title_regex: payload.titleRegex,
+        skip_subscriber_only: payload.skipSubscriberOnly,
       })
       .pipe(catchError((err) => this.handleHTTPError(err)));
   }
@@ -109,7 +111,12 @@ export class SubscriptionsService {
 
   update(
     id: string,
-    changes: Partial<Pick<SubscriptionRow, 'enabled' | 'check_interval_minutes' | 'name' | 'title_regex'>>,
+    changes: Partial<
+      Pick<
+        SubscriptionRow,
+        'enabled' | 'check_interval_minutes' | 'name' | 'title_regex' | 'skip_subscriber_only'
+      >
+    >,
   ) {
     return this.http
       .post('subscriptions/update', { id, ...changes })

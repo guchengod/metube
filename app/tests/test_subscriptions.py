@@ -28,7 +28,12 @@ sys.modules.setdefault("yt_dlp", fake_yt_dlp)
 sys.modules.setdefault("yt_dlp.networking", fake_networking)
 sys.modules.setdefault("yt_dlp.networking.impersonate", fake_impersonate)
 
-from subscriptions import SubscriptionManager, extract_flat_playlist
+from subscriptions import (
+    SubscriptionManager,
+    _is_subscriber_only_entry,
+    coerce_optional_bool,
+    extract_flat_playlist,
+)
 
 
 class _Config:
@@ -73,6 +78,20 @@ class _Notifier:
 def _create_legacy_shelf(path: str, record) -> None:
     with shelve.open(path, "c") as shelf:
         shelf["sub-1"] = record
+
+
+class SubscriberOnlyHelperTests(unittest.TestCase):
+    def test_is_subscriber_only_detects_availability(self):
+        self.assertTrue(_is_subscriber_only_entry({"availability": "subscriber_only"}))
+        self.assertFalse(_is_subscriber_only_entry({"availability": None}))
+        self.assertFalse(_is_subscriber_only_entry({}))
+
+    def test_coerce_optional_bool_defaults_and_fields(self):
+        self.assertFalse(coerce_optional_bool(None, default=False))
+        self.assertTrue(coerce_optional_bool(True))
+        self.assertFalse(coerce_optional_bool(False))
+        with self.assertRaises(ValueError):
+            coerce_optional_bool("maybe", field_name="skip_subscriber_only")
 
 
 class SubscriptionPersistenceTests(unittest.IsolatedAsyncioTestCase):
@@ -386,6 +405,108 @@ class SubscriptionPersistenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sub.seen_ids[:2], ["v2", "v1"])
             self.assertEqual([entry["webpage_url"] for entry, _, _ in queue.entries], ["https://example.com/v2"])
 
+    async def test_check_now_queues_subscriber_only_when_skip_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = _Queue()
+            mgr = SubscriptionManager(_Config(tmp), queue, _Notifier())
+
+            with patch(
+                "subscriptions.extract_flat_playlist",
+                side_effect=[
+                    (
+                        {"_type": "channel", "title": "Channel"},
+                        [{"id": "v1", "title": "One", "webpage_url": "https://example.com/v1"}],
+                    ),
+                    (
+                        {"_type": "channel", "title": "Channel"},
+                        [
+                            {
+                                "id": "v2",
+                                "title": "Members",
+                                "webpage_url": "https://example.com/v2",
+                                "availability": "subscriber_only",
+                            },
+                            {"id": "v1", "title": "One", "webpage_url": "https://example.com/v1"},
+                        ],
+                    ),
+                ],
+            ):
+                result = await mgr.add_subscription(
+                    "https://example.com/channel",
+                    check_interval_minutes=60,
+                    download_type="video",
+                    codec="auto",
+                    format="any",
+                    quality="best",
+                    folder="",
+                    custom_name_prefix="",
+                    auto_start=True,
+                    playlist_item_limit=0,
+                    split_by_chapters=False,
+                    chapter_template="",
+                    subtitle_language="en",
+                    subtitle_mode="prefer_manual",
+                    skip_subscriber_only=False,
+                )
+                self.assertFalse(mgr.list_all()[0].skip_subscriber_only)
+                await mgr.check_now([result["subscription"]["id"]])
+
+            sub = mgr.list_all()[0]
+            self.assertIsNone(sub.error)
+            self.assertEqual(sub.seen_ids[:2], ["v2", "v1"])
+            self.assertEqual([entry["webpage_url"] for entry, _, _ in queue.entries], ["https://example.com/v2"])
+
+    async def test_check_now_skips_subscriber_only_when_skip_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = _Queue()
+            mgr = SubscriptionManager(_Config(tmp), queue, _Notifier())
+
+            with patch(
+                "subscriptions.extract_flat_playlist",
+                side_effect=[
+                    (
+                        {"_type": "channel", "title": "Channel"},
+                        [{"id": "v1", "title": "One", "webpage_url": "https://example.com/v1"}],
+                    ),
+                    (
+                        {"_type": "channel", "title": "Channel"},
+                        [
+                            {
+                                "id": "v2",
+                                "title": "Members",
+                                "webpage_url": "https://example.com/v2",
+                                "availability": "subscriber_only",
+                            },
+                            {"id": "v1", "title": "One", "webpage_url": "https://example.com/v1"},
+                        ],
+                    ),
+                ],
+            ):
+                result = await mgr.add_subscription(
+                    "https://example.com/channel",
+                    check_interval_minutes=60,
+                    download_type="video",
+                    codec="auto",
+                    format="any",
+                    quality="best",
+                    folder="",
+                    custom_name_prefix="",
+                    auto_start=True,
+                    playlist_item_limit=0,
+                    split_by_chapters=False,
+                    chapter_template="",
+                    subtitle_language="en",
+                    subtitle_mode="prefer_manual",
+                    skip_subscriber_only=True,
+                )
+                self.assertTrue(mgr.list_all()[0].skip_subscriber_only)
+                await mgr.check_now([result["subscription"]["id"]])
+
+            sub = mgr.list_all()[0]
+            self.assertIsNone(sub.error)
+            self.assertEqual(sub.seen_ids[:2], ["v2", "v1"])
+            self.assertEqual(queue.entries, [])
+
     async def test_update_subscription_parses_string_false_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             queue = _Queue()
@@ -688,6 +809,72 @@ class SubscriptionPersistenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(upd["subscription"]["title_regex"], "foo|bar")
             self.assertEqual(mgr.list_all()[0].title_regex, "foo|bar")
 
+    async def test_update_subscription_skip_subscriber_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = _Queue()
+            mgr = SubscriptionManager(_Config(tmp), queue, _Notifier())
+            with patch(
+                "subscriptions.extract_flat_playlist",
+                return_value=(
+                    {"_type": "channel", "title": "Channel"},
+                    [{"id": "v1", "title": "One", "webpage_url": "https://example.com/v1"}],
+                ),
+            ):
+                result = await mgr.add_subscription(
+                    "https://example.com/channel",
+                    check_interval_minutes=60,
+                    download_type="video",
+                    codec="auto",
+                    format="any",
+                    quality="best",
+                    folder="",
+                    custom_name_prefix="",
+                    auto_start=True,
+                    playlist_item_limit=0,
+                    split_by_chapters=False,
+                    chapter_template="",
+                    subtitle_language="en",
+                    subtitle_mode="prefer_manual",
+                )
+            sub_id = result["subscription"]["id"]
+            self.assertFalse(mgr.list_all()[0].skip_subscriber_only)
+            upd = await mgr.update_subscription(sub_id, {"skip_subscriber_only": True})
+            self.assertEqual(upd["status"], "ok")
+            self.assertTrue(upd["subscription"]["skip_subscriber_only"])
+            self.assertTrue(mgr.list_all()[0].skip_subscriber_only)
+
+    async def test_update_subscription_rejects_invalid_skip_subscriber_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = _Queue()
+            mgr = SubscriptionManager(_Config(tmp), queue, _Notifier())
+            with patch(
+                "subscriptions.extract_flat_playlist",
+                return_value=(
+                    {"_type": "channel", "title": "Channel"},
+                    [{"id": "v1", "title": "One", "webpage_url": "https://example.com/v1"}],
+                ),
+            ):
+                result = await mgr.add_subscription(
+                    "https://example.com/channel",
+                    check_interval_minutes=60,
+                    download_type="video",
+                    codec="auto",
+                    format="any",
+                    quality="best",
+                    folder="",
+                    custom_name_prefix="",
+                    auto_start=True,
+                    playlist_item_limit=0,
+                    split_by_chapters=False,
+                    chapter_template="",
+                    subtitle_language="en",
+                    subtitle_mode="prefer_manual",
+                )
+            sub_id = result["subscription"]["id"]
+            upd = await mgr.update_subscription(sub_id, {"skip_subscriber_only": "maybe"})
+            self.assertEqual(upd["status"], "error")
+            self.assertFalse(mgr.list_all()[0].skip_subscriber_only)
+
     def test_persistence_includes_title_regex(self):
         with tempfile.TemporaryDirectory() as tmp:
             json_path = os.path.join(tmp, "subscriptions.json")
@@ -728,6 +915,49 @@ class SubscriptionPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 )
             mgr = SubscriptionManager(_Config(tmp), _Queue(), _Notifier())
             self.assertEqual(mgr.list_all()[0].title_regex, "EPISODE")
+            self.assertFalse(mgr.list_all()[0].skip_subscriber_only)
+
+    def test_persistence_includes_skip_subscriber_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "subscriptions.json")
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "schema_version": 2,
+                        "kind": "subscriptions",
+                        "items": [
+                            {
+                                "id": "sub-1",
+                                "name": "Channel",
+                                "url": "https://example.com/channel",
+                                "enabled": True,
+                                "check_interval_minutes": 60,
+                                "download_type": "video",
+                                "codec": "auto",
+                                "format": "any",
+                                "quality": "best",
+                                "folder": "",
+                                "custom_name_prefix": "",
+                                "auto_start": True,
+                                "playlist_item_limit": 0,
+                                "split_by_chapters": False,
+                                "chapter_template": "",
+                                "subtitle_language": "en",
+                                "subtitle_mode": "prefer_manual",
+                                "ytdl_options_presets": [],
+                                "ytdl_options_overrides": {},
+                                "title_regex": "",
+                                "skip_subscriber_only": True,
+                                "last_checked": None,
+                                "seen_ids": [],
+                                "error": None,
+                            }
+                        ],
+                    },
+                    f,
+                )
+            mgr = SubscriptionManager(_Config(tmp), _Queue(), _Notifier())
+            self.assertTrue(mgr.list_all()[0].skip_subscriber_only)
 
 
 class ExtractFlatPlaylistTests(unittest.TestCase):

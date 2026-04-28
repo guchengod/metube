@@ -93,6 +93,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
   subscribeInProgress = false;
   checkIntervalMinutes = 60;
   titleRegex = '';
+  skipSubscriberOnly = false;
   editingTitleRegexId: string | null = null;
   titleRegexEditDraft = '';
   cachedSubs: [string, SubscriptionRow][] = [];
@@ -593,6 +594,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
         ...subscribeBase,
         checkIntervalMinutes: this.checkIntervalMinutes,
         titleRegex: tr,
+        skipSubscriberOnly: this.skipSubscriberOnly,
       })
       .pipe(
         takeUntilDestroyed(this.destroyRef),
@@ -609,6 +611,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
           } else {
             this.addUrl = '';
             this.titleRegex = '';
+            this.skipSubscriberOnly = false;
           }
         },
       });

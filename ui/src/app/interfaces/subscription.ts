@@ -10,6 +10,7 @@ export interface SubscriptionRow {
   quality: string;
   folder: string;
   title_regex?: string;
+  skip_subscriber_only?: boolean;
   last_checked: number | null;
   seen_count: number;
   error: string | null;

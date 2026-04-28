@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from watchfiles import DefaultFilter, Change, awatch
 
 from ytdl import DownloadQueueNotifier, DownloadQueue, Download
-from subscriptions import SubscriptionManager, SubscriptionNotifier, SubscriptionInfo
+from subscriptions import SubscriptionManager, SubscriptionNotifier, SubscriptionInfo, coerce_optional_bool
 from yt_dlp.version import __version__ as yt_dlp_version
 
 log = logging.getLogger('main')
@@ -777,6 +777,15 @@ async def subscribe(request):
     if o.get('clip_start') is not None or o.get('clip_end') is not None:
         raise web.HTTPBadRequest(reason='clip options are not supported for subscriptions')
 
+    try:
+        skip_subscriber_only = coerce_optional_bool(
+            post.get('skip_subscriber_only'),
+            default=False,
+            field_name='skip_subscriber_only',
+        )
+    except ValueError as exc:
+        raise web.HTTPBadRequest(reason=str(exc)) from exc
+
     result = await submgr.add_subscription(
         o['url'],
         check_interval_minutes=cic,
@@ -795,6 +804,7 @@ async def subscribe(request):
         ytdl_options_presets=o['ytdl_options_presets'],
         ytdl_options_overrides=o['ytdl_options_overrides'],
         title_regex=post.get('title_regex'),
+        skip_subscriber_only=skip_subscriber_only,
     )
     return web.Response(text=serializer.encode(result))
 
@@ -813,7 +823,8 @@ async def subscriptions_update(request):
     changes = {
         k: v
         for k, v in post.items()
-        if k != 'id' and k in ('enabled', 'check_interval_minutes', 'name', 'title_regex')
+        if k != 'id'
+        and k in ('enabled', 'check_interval_minutes', 'name', 'title_regex', 'skip_subscriber_only')
     }
     if not changes:
         raise web.HTTPBadRequest(reason='no valid fields to update')
